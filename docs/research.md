@@ -82,3 +82,125 @@ A clear observability/documentation issue.
 - High confidence: the problem statement is clear and self-contained
 - Lowest blast radius of all candidates
 - Contributes directly to developer experience (cost visibility)
+
+---
+
+## OpenTelemetry Collector — Component Metrics & Prometheus Integration
+
+### Session: 2026-04-01
+
+**Repository:** https://github.com/open-telemetry/opentelemetry-collector
+**Focus area:** How collector components emit metrics to the internal Prometheus endpoint (issue #7960)
+
+---
+
+### The Core Architecture
+
+The collector exposes an `otelcol_` prefixed Prometheus endpoint via its `service::telemetry::metrics`
+config. Components (receivers, processors, exporters) emit metrics **through the OTEL MeterProvider**
+passed in `TelemetrySettings.MeterProvider` — they do **not** stand up their own Prometheus endpoint.
+
+```
+component.TelemetrySettings
+  └── MeterProvider (metric.MeterProvider)
+       └── collects instrument data
+            └── exported via service telemetry config → Prometheus endpoint (:8888 by default)
+```
+
+---
+
+### The `mdatagen` Workflow (Code Generation Pattern)
+
+The correct way for a component to emit custom metrics is:
+
+1. **Define metrics in `metadata.yaml`** at the component root:
+   ```yaml
+   telemetry:
+     metrics:
+       my_custom_counter:
+         enabled: true
+         stability: alpha
+         description: "Number of things processed."
+         unit: "{item}"
+         sum:
+           value_type: int
+           monotonic: true
+   ```
+
+2. **Run `go generate` / `mdatagen`** — this auto-generates:
+   - `internal/metadata/generated_telemetry.go` — contains `TelemetryBuilder` struct with typed metric
+     fields and a `NewTelemetryBuilder(settings component.TelemetrySettings)` constructor
+   - `internal/metadata/generated_telemetry_test.go` — test coverage for builder
+
+3. **Use `TelemetryBuilder` in your component factory:**
+   ```go
+   func newReceiver(cfg ObsReportSettings) (*MyReceiver, error) {
+       telemetryBuilder, err := metadata.NewTelemetryBuilder(cfg.ReceiverCreateSettings.TelemetrySettings)
+       if err != nil {
+           return nil, err
+       }
+       return &MyReceiver{telemetryBuilder: telemetryBuilder}, nil
+   }
+   ```
+
+4. **Emit metrics via the builder:**
+   ```go
+   rec.telemetryBuilder.MyCustomCounter.Add(ctx, 1, metric.WithAttributeSet(...))
+   ```
+
+The `TelemetryBuilder` internally calls `settings.MeterProvider.Meter(instrumentationScope)`, binding
+all instruments to the collectors shared MeterProvider — which the service exports to Prometheus.
+
+---
+
+### Real Example: receiverhelper
+
+File: `receiver/receiverhelper/internal/metadata/generated_telemetry.go`
+
+```go
+func NewTelemetryBuilder(settings component.TelemetrySettings, ...) (*TelemetryBuilder, error) {
+    builder.meter = settings.MeterProvider.Meter("go.opentelemetry.io/collector/receiver/receiverhelper")
+    builder.ReceiverAcceptedLogRecords, err = builder.meter.Int64Counter(
+        "otelcol_receiver_accepted_log_records",
+        metric.WithDescription("Number of log records successfully pushed into the pipeline."),
+        metric.WithUnit("{record}"),
+    )
+    ...
+}
+```
+
+The `ObsReport` struct in `receiver/receiverhelper/obsreport.go` wraps `TelemetryBuilder` and
+provides Start/End operation helpers that call `telemetryBuilder.ReceiverAcceptedLogRecords.Add(...)`.
+
+---
+
+### What Was Not Documented (issue #7960)
+
+The issue author had no clear path from "I want to emit a custom metric" to "it appears in Prometheus".
+The gap:
+
+- `metadata.yaml` + `mdatagen` is the right entry point — but this is **not documented** outside of
+  internal component READMEs and scattered contributor guides
+- The relationship between `TelemetrySettings.MeterProvider` and the collector Prometheus endpoint
+  is implicit — the service wires it up behind the scenes, but there is no explicit doc explaining this
+- `ObsReport*` helpers (e.g. `receiverhelper.ObsReport`) exist for common patterns, but are not
+  indexed or discoverable from the collector root docs
+
+---
+
+### Recommendation
+
+A future ANALYZE cycle should propose:
+1. A new section in `docs/component-development.md` (or similar) explaining the
+   `metadata.yaml → mdatagen → TelemetryBuilder → MeterProvider → Prometheus` pipeline
+2. A minimal reference example showing a counter in `metadata.yaml` → used in a factory → visible
+   in the Prometheus scrape output
+3. Cross-link from the existing `TelemetrySettings` godoc to this guide
+
+This is a pure additive doc change. No code changes needed. Well-scoped, high-impact for new
+component authors.
+
+---
+
+### Confidence After Research: HIGH
+Ready to ANALYZE in the next cycle and propose a concrete doc PR.
