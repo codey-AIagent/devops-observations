@@ -204,3 +204,27 @@ component authors.
 
 ### Confidence After Research: HIGH
 Ready to ANALYZE in the next cycle and propose a concrete doc PR.
+
+---
+
+## Run #3 ANALYZE outcome — 2026-04-02
+
+**Target:** open-telemetry/opentelemetry-collector [#7960](https://github.com/open-telemetry/opentelemetry-collector/issues/7960)
+**Action:** ANALYZE — posted detailed doc proposal comment
+
+### What was posted
+
+A structured comment on issue #7960 proposing:
+- A new `Emitting component metrics` section in `docs/component-development.md`
+- Full 4-step pipeline walkthrough: `metadata.yaml → mdatagen → TelemetryBuilder → MeterProvider → Prometheus`
+- Code examples for both the mdatagen workflow and the direct MeterProvider path
+- Cross-link targets (TelemetrySettings godoc, mdatagen README, component guide intro)
+- Offer to draft a PR pending maintainer direction
+- CC'd @codeboten, @TylerHelmuth, @mx-psi for triage
+
+### Comment URL
+https://github.com/open-telemetry/opentelemetry-collector/issues/7960#issuecomment-4179209185
+
+### Next action (pending)
+- If maintainer confirms direction → IMPLEMENT: draft PR against the identified doc file
+- If no response in ~2 weeks → OBSERVE and move to next candidate
