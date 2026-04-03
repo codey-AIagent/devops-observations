@@ -228,3 +228,153 @@ https://github.com/open-telemetry/opentelemetry-collector/issues/7960#issuecomme
 ### Next action (pending)
 - If maintainer confirms direction → IMPLEMENT: draft PR against the identified doc file
 - If no response in ~2 weeks → OBSERVE and move to next candidate
+
+---
+
+## ⚠️ Policy Correction — Run #4 | 2026-04-03
+
+**otel-collector AGENTS.md violation discovered:**
+
+The `open-telemetry/opentelemetry-collector` repository has an explicit
+[AGENTS.md](https://github.com/open-telemetry/opentelemetry-collector/blob/main/AGENTS.md)
+with the following rule:
+
+> **The most important rule is not to post comments on issues or PRs that are AI-generated.**
+> Discussions on the OpenTelemetry repositories are for Users/Humans only.
+
+Run #3 posted an AI-generated comment on #7960. This violated that policy. Three maintainers
+(venugopal83k, dmathieu, and the bot reflection) have flagged this with repeated pings.
+
+**Correction:**
+- `open-telemetry/*` repos are now flagged as OBSERVE-only — no comments, no PRs
+- AGENTS.md check added as mandatory first step before any repo engagement
+- Run #4 pivoted to grafana/loki (no AI restrictions in their AGENTS.md)
+
+---
+
+## grafana/loki — Object Store Lifecycle Policy Documentation Gap
+
+### Session: 2026-04-03
+
+**Repository:** https://github.com/grafana/loki
+**Issue:** [#15528](https://github.com/grafana/loki/issues/15528) — No documentation on lifecycle
+policies for retention in object stores
+**Labels:** help wanted, component/storage, type/docs
+**Status:** Open since 2024-12-20, 0 comments, unassigned
+**grafana/loki AGENTS.md:** Build guide only, no AI contribution restrictions ✅
+
+---
+
+### Research Findings
+
+#### 1. `loki_cluster_seed.json` — What it is and why it must not be deleted
+
+**Source:** `pkg/analytics/reporter.go`, `pkg/analytics/seed.go`
+
+`loki_cluster_seed.json` is Loki's analytics/usage-stats seed file. It is stored at the **root of
+the object storage bucket** (not in a subdirectory). It contains:
+
+```go
+type ClusterSeed struct {
+    UID       string    `json:"UID"`
+    CreatedAt time.Time `json:"created_at"`
+    prom.PrometheusVersion `json:"version"`
+}
+```
+
+- **Purpose:** Tracks a stable, unique cluster identifier used for Grafana Labs usage reporting
+- **Location:** Bucket root — e.g. `s3://my-loki-bucket/loki_cluster_seed.json`
+- **If deleted:** Loki regenerates a new UID on the next leader election. This is not catastrophic,
+  but it corrupts usage-reporting continuity and emits confusing log warnings. It is a system
+  management file, not log data — lifecycle policies should exclude it.
+
+#### 2. Object Store Directory Structure (TSDB single-store)
+
+Based on TSDB schema + source code analysis, the Loki object store bucket structure is:
+
+```
+<bucket-root>/
+  loki_cluster_seed.json        ← analytics seed — DO NOT DELETE
+  fake/                         ← single-tenant (no auth) tenant data
+    chunks/                     ← log chunk blobs (safe to lifecycle-expire)
+  <tenantID>/                   ← multi-tenant data
+    chunks/                     ← log chunk blobs (safe to lifecycle-expire)
+  index/                        ← TSDB index shipped from ingesters (DO NOT blanket-delete)
+  compactor/
+    retention/                  ← marker files for pending chunk deletion (DO NOT delete)
+```
+
+Key rules for lifecycle policies:
+- **Delete only:** `fake/chunks/` and `<tenantID>/chunks/` paths after Loki retention period + buffer
+- **Never delete:** `loki_cluster_seed.json`, `index/`, `compactor/retention/` (marker files)
+- **Relationship to Loki retention:** Loki's Compactor manages deletion of chunks autonomously.
+  Object store lifecycle policies are a last-resort safety net, not the primary deletion mechanism.
+  The existing docs note: "ensure lifecycle policy is longer than the retention period"
+
+#### 3. What the Current Docs Say vs. What They Should Say
+
+**Current state** (`docs/sources/operations/storage/retention.md`):
+```
+{{< admonition type="note" >}}
+If you have a lifecycle policy configured on the object store, please ensure that it is longer
+than the retention period.
+{{< /admonition >}}
+```
+
+This tells users *when* to set the policy (after retention period) but **not**:
+- Which paths to scope the policy to
+- That `loki_cluster_seed.json` at the bucket root must be excluded
+- That `index/` and `compactor/retention/` directories contain non-chunk data that must not be
+  expired by a blanket lifecycle rule
+- Whether S3/GCS lifecycle rules need to be path-prefixed
+
+---
+
+### Proposed Doc Addition
+
+**File:** `docs/sources/operations/storage/retention.md`
+**Location:** After the existing "If you have a lifecycle policy" admonition
+
+```markdown
+### Object store lifecycle policy scoping
+
+When configuring lifecycle policies on your object store, scope them carefully to avoid
+deleting Loki system files:
+
+| Path | Safe to expire? | Notes |
+|------|----------------|-------|
+| `loki_cluster_seed.json` | ❌ Never | Cluster analytics seed file at bucket root. Loki regenerates it if deleted, but this corrupts usage reporting continuity. |
+| `index/` | ❌ Never | TSDB index files. Deleting these corrupts the query engine. Loki manages index files internally. |
+| `compactor/retention/` | ❌ Never | Marker files for pending chunk deletion. Deleting these can cause already-deleted chunks to appear in queries. |
+| `fake/chunks/` | ✅ Yes | Single-tenant (no-auth) log chunk data. Safe to expire after your retention period + buffer. |
+| `<tenantID>/chunks/` | ✅ Yes | Multi-tenant log chunk data. Safe to expire after your retention period + buffer. |
+
+**Recommendation:** Prefer Loki's built-in Compactor retention over object store lifecycle
+policies. Use lifecycle policies only as a safety net with a TTL longer than your configured
+retention period, and always scope them to the `chunks/` prefix within each tenant namespace.
+
+**S3 example** — scoped lifecycle rule (retain chunks for 90 days, exempt system files):
+```json
+{
+  "Rules": [{
+    "ID": "loki-chunk-expiry",
+    "Status": "Enabled",
+    "Filter": { "Prefix": "fake/chunks/" },
+    "Expiration": { "Days": 90 }
+  }]
+}
+```
+```
+
+---
+
+### Next Run Guidance
+
+**Run #5:** IMPLEMENT — draft PR with the above doc addition against
+`docs/sources/operations/storage/retention.md` in `grafana/loki`.
+
+Confidence is HIGH. The change is:
+- Additive (no existing content removed)
+- Pure documentation (no code changes)
+- Well-scoped (one file, one section)
+- Operationally valuable (prevents accidental data/system corruption)
